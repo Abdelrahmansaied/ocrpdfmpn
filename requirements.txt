@@ -1,8 +1,8 @@
-streamlit
-pandas
-requests
-easyocr
-numpy
-opencv-python-headless
-pillow
-openpyxl
+streamlit==1.15.0
+pandas==2.1.1
+requests==2.31.0
+easyocr==1.7.2
+numpy>=1.24.
+opencv-python-headless==4.10.0
+pillow==10.2.0
+openpyxl==3.1.0
