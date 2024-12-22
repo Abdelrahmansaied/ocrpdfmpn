@@ -6,111 +6,74 @@ import streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 import difflib as dlb
 import fitz
-import traceback
 import easyocr  # Import EasyOCR
-import numpy as np
 
 def clean_string(s):
     """Remove illegal characters from a string."""
-    if isinstance(s, str):
-        return re.sub(r'[\x00-\x1F\x7F]', '', s)
-    return s
+    return re.sub(r'[\x00-\x1F\x7F]', '', s) if isinstance(s, str) else s
 
-def GetPDFResponse(pdf):
-    """Get PDF response from URL and return content."""
+def get_pdf_text(pdf_url):
+    """Fetch and extract text from a PDF URL."""
     try:
-        response = requests.get(pdf, timeout=10)
+        response = requests.get(pdf_url, timeout=10)
         response.raise_for_status()
-        return pdf, io.BytesIO(response.content)
+        
+        # Open PDF with fitz
+        with fitz.open(stream=io.BytesIO(response.content), filetype='pdf') as doc:
+            return '\n'.join(page.get_text() for page in doc)
     except Exception as e:
-        print(f"Error fetching PDF {pdf}: {e}")
-        return pdf, None
-
-def GetPDFText(pdfs):
-    """Extract text from a list of PDF URLs."""
-    pdfData = {}
-    chunks = [pdfs[i:i + 100] for i in range(0, len(pdfs), 100)]
-    
-    for chunk in chunks:
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(GetPDFResponse, chunk))
-
-        for pdf, byt in results:
-            if byt is not None:
-                try:
-                    with fitz.open(stream=byt, filetype='pdf') as doc:
-                        pdfData[pdf] = '\n'.join(page.get_text() for page in doc)
-                except Exception as e:
-                    print(f"Error reading PDF {pdf}: {e}")
-
-    return pdfData
+        print(f"Error processing PDF {pdf_url}: {e}")
+        return ""
 
 def ocr_text_from_pdf(pdf_bytes):
     """Extract text from PDF using OCR."""
-    reader = easyocr.Reader(['en'])  # Initialize OCR reader
-    try:
-        images = fitz.open(stream=pdf_bytes, filetype="pdf")
-        full_text = ''
-        for page in images:
-            img = page.get_pixmap()  # Get image from page
-            img_np = np.frombuffer(img.samples, dtype=np.uint8).reshape(img.height, img.width, img.n)
-            results = reader.readtext(img_np)
-            full_text += ' '.join([result[1] for result in results]) + '\n'
-        return full_text.strip()
-    except Exception as e:
-        print(f"Error with OCR processing: {e}")
-        return ""
+    reader = easyocr.Reader(['en'])
+    images = fitz.open(stream=pdf_bytes, filetype="pdf")
+    full_text = ''
+    for page in images:
+        img = page.get_pixmap()
+        img_np = img.samples.reshape(img.height, img.width, img.n)
+        results = reader.readtext(img_np)
+        full_text += ' '.join([result[1] for result in results]) + '\n'
+    return full_text.strip()
 
-def PN_Validation_New(pdf_data, part_col, pdf_col, data):
+def validate_parts(pdf_data, part_col, pdf_col, data):
     """Validate parts against extracted PDF data."""
     data['STATUS'] = None
     data['EQUIVALENT'] = None
     data['SIMILARS'] = None
 
-    def SET_DESC(index):
+    def set_desc(index):
         part = data[part_col][index]
         pdf_url = data[pdf_col][index]
         
-        if pdf_url not in pdf_data:
-            data['STATUS'][index] = 'May be Broken'
+        if pdf_url not in pdf_data or not pdf_data[pdf_url]:
+            data.at[index, 'STATUS'] = 'May be Broken'
             return
 
         values = pdf_data[pdf_url]
-        
-        if len(values) <= 100:  # Use OCR when text is too short
+        if len(values) <= 100:  # Use OCR for short text
             pdf_bytes = requests.get(pdf_url).content
-            extracted_text = ocr_text_from_pdf(pdf_bytes)
-            values = extracted_text  # Update values to the OCR extracted text
-            
-        print(f"Extracted Text for {pdf_url}: {values}")  # Debugging line
+            values = ocr_text_from_pdf(pdf_bytes)
 
-        # Check for exact match first
-        exact = re.search(re.escape(part), values, flags=re.IGNORECASE)
-        if exact:
-            data['STATUS'][index] = 'Exact'
-            data['EQUIVALENT'][index] = exact.group(0)
-            semi_regex = {
-                match.strip() for match in re.findall(r'\b\w*' + re.escape(part) + r'\w*\b', values, flags=re.IGNORECASE)
-            }
-            if semi_regex:
-                data['SIMILARS'][index] = '|'.join(semi_regex)
+        exact_match = re.search(re.escape(part), values, flags=re.IGNORECASE)
+        if exact_match:
+            data.at[index, 'STATUS'] = 'Exact'
+            data.at[index, 'EQUIVALENT'] = exact_match.group(0)
+            return
+        
+        similar_matches = dlb.get_close_matches(part, re.split(r'\W+', values), n=1, cutoff=0.65)
+        if similar_matches:
+            data.at[index, 'STATUS'] = 'Includes or Missed Suffixes'
+            data.at[index, 'EQUIVALENT'] = similar_matches[0]
             return
 
-        # Check for close matches
-        dlb_match = dlb.get_close_matches(part, re.split('[ \n]', values), n=1, cutoff=0.65)
-        if dlb_match:
-            pdf_part = dlb_match[0]
-            data['STATUS'][index] = 'Includes or Missed Suffixes'
-            data['EQUIVALENT'][index] = pdf_part
-            return
-
-        # Default case when no match is found
-        data['STATUS'][index] = 'Not Found'
-        data['EQUIVALENT'][index] = 'No equivalent found'
-        data['SIMILARS'][index] = 'None'
+        data.at[index, 'STATUS'] = 'Not Found'
+        data.at[index, 'EQUIVALENT'] = 'No equivalent found'
+        data.at[index, 'SIMILARS'] = 'None'
 
     with ThreadPoolExecutor() as executor:
-        executor.map(SET_DESC, data.index)
+        executor.map(set_desc, data.index)
 
     return data
 
@@ -126,8 +89,9 @@ def main():
 
             if all(col in data.columns for col in ['MPN', 'PDF']):
                 pdfs = data['PDF'].tolist()
-                pdf_data = GetPDFText(pdfs)
-                result_data = PN_Validation_New(pdf_data, 'MPN', 'PDF', data)
+                pdf_data = {pdf: get_pdf_text(pdf) for pdf in pdfs}
+
+                result_data = validate_parts(pdf_data, 'MPN', 'PDF', data)
 
                 # Clean the output data
                 for col in ['MPN', 'PDF', 'STATUS', 'EQUIVALENT', 'SIMILARS']:
@@ -135,26 +99,17 @@ def main():
 
                 # Display validation results
                 st.subheader("Validation Results")
-                STATUS_color = {
-                    'Exact': 'green',
-                    'Includes or Missed Suffixes': 'orange',
-                    'Not Found': 'red',
-                    'May be Broken': 'gray'
-                }
-
                 for index, row in result_data.iterrows():
-                    color = STATUS_color.get(row['STATUS'], 'black')
-                    st.markdown(f"<div style='color: {color};'>{row['MPN']} - {row['STATUS']} - {row['EQUIVALENT']} - {row['SIMILARS']}</div>", unsafe_allow_html=True)
+                    st.markdown(f"{row['MPN']} - {row['STATUS']} - {row['EQUIVALENT']} - {row['SIMILARS']}")
 
                 output_file = "MPN_Validation_Result.xlsx"
-                result_data.to_excel(output_file, index=False, engine='openpyxl')
+                result_data.to_excel(output_file, index=False)
                 st.sidebar.download_button("Download Results 📥", data=open(output_file, "rb"), file_name=output_file)
 
             else:
                 st.error("The uploaded file must contain 'MPN' and 'PDF' columns.")
         except Exception as e:
-            st.error(f"An error occurred while processing: {e}")
-            st.error(traceback.format_exc())
+            st.error(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     main()
