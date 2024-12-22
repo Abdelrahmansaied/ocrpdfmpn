@@ -30,7 +30,7 @@ def GetPDFText(pdfs):
     """Extract text from a list of PDF URLs."""
     pdfData = {}
     chunks = [pdfs[i:i + 100] for i in range(0, len(pdfs), 100)]
-
+    
     for chunk in chunks:
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(GetPDFResponse, chunk))
@@ -76,12 +76,15 @@ def PN_Validation_New(pdf_data, part_col, pdf_col, data):
             return
 
         values = pdf_data[pdf_url]
+        
         if len(values) <= 100:  # Use OCR when text is too short
             pdf_bytes = requests.get(pdf_url).content
             extracted_text = ocr_text_from_pdf(pdf_bytes)
             values = extracted_text  # Update values to the OCR extracted text
+            
+        print(f"Extracted Text for {pdf_url}: {values}")  # Debugging line
 
-        # Now perform the same checks as done for regular PDF text
+        # Check for exact match first
         exact = re.search(re.escape(part), values, flags=re.IGNORECASE)
         if exact:
             data['STATUS'][index] = 'Exact'
@@ -93,6 +96,7 @@ def PN_Validation_New(pdf_data, part_col, pdf_col, data):
                 data['SIMILARS'][index] = '|'.join(semi_regex)
             return
 
+        # Check for close matches
         dlb_match = dlb.get_close_matches(part, re.split('[ \n]', values), n=1, cutoff=0.65)
         if dlb_match:
             pdf_part = dlb_match[0]
@@ -100,7 +104,10 @@ def PN_Validation_New(pdf_data, part_col, pdf_col, data):
             data['EQUIVALENT'][index] = pdf_part
             return
 
+        # Default case when no match is found
         data['STATUS'][index] = 'Not Found'
+        data['EQUIVALENT'][index] = 'No equivalent found'
+        data['SIMILARS'][index] = 'None'
 
     with ThreadPoolExecutor() as executor:
         executor.map(SET_DESC, data.index)
