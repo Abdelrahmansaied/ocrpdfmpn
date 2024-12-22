@@ -17,13 +17,11 @@ def get_pdf_text(pdf_url):
     try:
         response = requests.get(pdf_url, timeout=10)
         response.raise_for_status()
-        
-        # Open PDF with fitz
         with fitz.open(stream=io.BytesIO(response.content), filetype='pdf') as doc:
             return '\n'.join(page.get_text() for page in doc)
     except Exception as e:
         print(f"Error processing PDF {pdf_url}: {e}")
-        return ""
+        return None  # Explicitly return None on error
 
 def ocr_text_from_pdf(pdf_bytes):
     """Extract text from PDF using OCR."""
@@ -47,21 +45,26 @@ def validate_parts(pdf_data, part_col, pdf_col, data):
         part = data[part_col][index]
         pdf_url = data[pdf_col][index]
         
-        if pdf_url not in pdf_data or not pdf_data[pdf_url]:
-            data.at[index, 'STATUS'] = 'May be Broken'
-            return
+        values = pdf_data.get(pdf_url)
+        if values is None:
+            # Check if we can fetch and read the PDF
+            values = get_pdf_text(pdf_url)
+            if values is None:
+                data.at[index, 'STATUS'] = 'May be Broken'
+                return
 
-        values = pdf_data[pdf_url]
         if len(values) <= 100:  # Use OCR for short text
             pdf_bytes = requests.get(pdf_url).content
             values = ocr_text_from_pdf(pdf_bytes)
 
+        # Check for exact match
         exact_match = re.search(re.escape(part), values, flags=re.IGNORECASE)
         if exact_match:
             data.at[index, 'STATUS'] = 'Exact'
             data.at[index, 'EQUIVALENT'] = exact_match.group(0)
             return
         
+        # Check for close matches
         similar_matches = dlb.get_close_matches(part, re.split(r'\W+', values), n=1, cutoff=0.65)
         if similar_matches:
             data.at[index, 'STATUS'] = 'Includes or Missed Suffixes'
